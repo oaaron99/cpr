@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -14,19 +15,43 @@
 #if defined(_Win32)
 #include <Windows.h>
 #else
+// https://en.cppreference.com/w/c/string/byte/memset
+// NOLINTNEXTLINE(bugprone-reserved-identifier, cert-dcl37-c, cert-dcl51-cpp, cppcoreguidelines-macro-usage)
+#define __STDC_WANT_LIB_EXT1__ 1
 #include <cstring>
 #endif
 
 namespace cpr {
 namespace util {
 
+enum class CurlHTTPCookieField : size_t {
+    Domain = 0,
+    IncludeSubdomains,
+    Path,
+    HttpsOnly,
+    Expires,
+    Name,
+    Value,
+};
+
 Cookies parseCookies(curl_slist* raw_cookies) {
+    const int CURL_HTTP_COOKIE_SIZE = static_cast<int>(CurlHTTPCookieField::Value) + 1;
     Cookies cookies;
     for (curl_slist* nc = raw_cookies; nc; nc = nc->next) {
         std::vector<std::string> tokens = cpr::util::split(nc->data, '\t');
-        std::string value = tokens.back();
-        tokens.pop_back();
-        cookies[tokens.back()] = value;
+        while (tokens.size() < CURL_HTTP_COOKIE_SIZE) {
+            tokens.emplace_back("");
+        }
+        std::time_t expires = static_cast<time_t>(std::stoul(tokens.at(static_cast<size_t>(CurlHTTPCookieField::Expires))));
+        cookies.emplace_back(Cookie{
+                tokens.at(static_cast<size_t>(CurlHTTPCookieField::Name)),
+                tokens.at(static_cast<size_t>(CurlHTTPCookieField::Value)),
+                tokens.at(static_cast<size_t>(CurlHTTPCookieField::Domain)),
+                isTrue(tokens.at(static_cast<size_t>(CurlHTTPCookieField::IncludeSubdomains))),
+                tokens.at(static_cast<size_t>(CurlHTTPCookieField::Path)),
+                isTrue(tokens.at(static_cast<size_t>(CurlHTTPCookieField::HttpsOnly))),
+                std::chrono::system_clock::from_time_t(expires),
+        });
     }
     return cookies;
 }
@@ -130,7 +155,7 @@ int progressUserFunction(const ProgressCallback* progress, curl_off_t dltotal, c
 }
 
 int debugUserFunction(CURL* /*handle*/, curl_infotype type, char* data, size_t size, const DebugCallback* debug) {
-    (*debug)(DebugCallback::InfoType(type), std::string(data, size));
+    (*debug)(static_cast<DebugCallback::InfoType>(type), std::string(data, size));
     return 0;
 }
 
@@ -164,34 +189,50 @@ std::string urlDecode(const std::string& s) {
     return holder.urlDecode(s);
 }
 
-/**
- * Override the content of the provided string to hide sensitve data. The
- * string content after invocation is undefined. The string size is reset to zero.
- * impl. based on:
- * https://github.com/ojeda/secure_clear/blob/master/example-implementation/secure_clear.h
- **/
+#if defined(__STDC_LIB_EXT1__)
 void secureStringClear(std::string& s) {
     if (s.empty()) {
         return;
     }
-
-#if defined(__linux__) || defined(__unix__)
-    explicit_bzero(&s.front(), s.length());
-#elif defined(_WIN32)
-    SecureZeroMemory(&s.front(), s.length());
-#elif defined(__STDC_LIB_EXT1__)
     memset_s(&s.front(), s.length(), 0, s.length());
-#else
-#pragma GCC push_options   // g++
-#pragma GCC optimize("O0") // g++
-#pragma clang optimize off // clang
-#pragma optimize("", off)  // MSVC
-    std::memset(s.data(), 0, s.length());
-#pragma optimize("", on)   // MSVC
-#pragma clang optimize on  // clang
-#pragma GCC pop_options    // g++
-#endif
     s.clear();
 }
+#elif defined(_WIN32)
+void secureStringClear(std::string& s) {
+    if (s.empty()) {
+        return;
+    }
+    SecureZeroMemory(&s.front(), s.length());
+    s.clear();
+}
+#else
+#if defined(__clang__)
+#pragma clang optimize off // clang
+#elif defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW32__) || defined(__MINGW64__)
+#pragma GCC push_options   // g++
+#pragma GCC optimize("O0") // g++
+#endif
+void secureStringClear(std::string& s) {
+    if (s.empty()) {
+        return;
+    }
+    // NOLINTNEXTLINE (readability-container-data-pointer)
+    char* ptr = &(s[0]);
+    memset(ptr, '\0', s.length());
+    s.clear();
+}
+#if defined(__clang__)
+#pragma clang optimize on // clang
+#elif defined(__GNUC__) || defined(__MINGW32__) || defined(__MINGW32__) || defined(__MINGW64__)
+#pragma GCC pop_options // g++
+#endif
+#endif
+
+bool isTrue(const std::string& s) {
+    std::string temp_string{s};
+    std::transform(temp_string.begin(), temp_string.end(), temp_string.begin(), [](unsigned char c) { return std::tolower(c); });
+    return temp_string == "true";
+}
+
 } // namespace util
 } // namespace cpr
